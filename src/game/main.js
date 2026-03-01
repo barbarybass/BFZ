@@ -2,6 +2,7 @@ import { GameLoop } from '../engine/gameLoop.js';
 import { Grid } from '../engine/grid.js';
 import { Camera } from '../engine/camera.js';
 import { Entity } from '../engine/entity.js';
+import { Pathfinder } from '../engine/pathfinder.js';
 
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
@@ -9,21 +10,20 @@ const ctx = canvas.getContext('2d');
 canvas.width = 800;
 canvas.height = 600;
 
-const grid = new Grid(32, 24, 32);
-const mapWidth  = grid.cols * grid.tileSize;
-const mapHeight = grid.rows * grid.tileSize;
-const camera = new Camera(canvas.width, canvas.height, mapWidth, mapHeight);
+const grid       = new Grid(32, 24, 32);
+const mapWidth   = grid.cols * grid.tileSize;
+const mapHeight  = grid.rows * grid.tileSize;
+const camera     = new Camera(canvas.width, canvas.height, mapWidth, mapHeight);
+const pathfinder = new Pathfinder(grid);
 
-// --- Create a few test entities ---
-const entities = [
-  new Entity({ label: 'Footman', type: 'unit', owner: 1, x: 100, y: 100, maxHealth: 100 }),
-  new Entity({ label: 'Footman', type: 'unit', owner: 1, x: 150, y: 100, maxHealth: 100 }),
-  new Entity({ label: 'Grunt',   type: 'unit', owner: 2, x: 300, y: 200, maxHealth: 120, currentHealth: 80 }),
-  new Entity({ label: 'Grunt',   type: 'unit', owner: 2, x: 350, y: 200, maxHealth: 120, currentHealth: 40 }),
-];
+// Create a selected footman we can order around
+const footman = new Entity({
+  label: 'Footman', type: 'unit', owner: 1,
+  x: 64, y: 64, maxHealth: 100
+});
+footman.selected = true;
 
-// Select the first entity so we can see the selection ring
-entities[0].selected = true;
+const entities = [footman];
 
 // --- Mouse events ---
 canvas.addEventListener('mousemove', (e) => {
@@ -32,6 +32,45 @@ canvas.addEventListener('mousemove', (e) => {
 });
 
 canvas.addEventListener('mouseleave', () => camera.onMouseLeave());
+
+// Right-click to move the selected unit
+canvas.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+
+  const worldX = e.clientX - rect.left + camera.x;
+  const worldY = e.clientY - rect.top  + camera.y;
+
+  let targetCol = Math.floor(worldX / grid.tileSize);
+  let targetRow = Math.floor(worldY / grid.tileSize);
+
+  // If the target tile is unwalkable, search outward in a spiral
+  // for the nearest walkable tile and go there instead
+  if (!grid.getTile(targetCol, targetRow)?.walkable) {
+    let found = false;
+    for (let radius = 1; radius <= 10 && !found; radius++) {
+      for (let dRow = -radius; dRow <= radius && !found; dRow++) {
+        for (let dCol = -radius; dCol <= radius && !found; dCol++) {
+          // Only check the outer ring of this radius
+          if (Math.abs(dRow) !== radius && Math.abs(dCol) !== radius) continue;
+          const checkCol = targetCol + dCol;
+          const checkRow = targetRow + dRow;
+          const tile = grid.getTile(checkCol, checkRow);
+          if (tile && tile.walkable) {
+            targetCol = checkCol;
+            targetRow = checkRow;
+            found = true;
+          }
+        }
+      }
+    }
+    if (!found) return; // Completely surrounded, do nothing
+  }
+
+  const unitPos = footman.getGridPosition(grid.tileSize);
+  const path = pathfinder.findPath(unitPos.col, unitPos.row, targetCol, targetRow);
+  if (path) footman.setPath(path, grid.tileSize);
+});
 
 // --- Update ---
 function update(delta) {
