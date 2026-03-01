@@ -17,6 +17,17 @@ export class Entity {
     this.path   = [];
     this.moving = false;
     this.blockedTimer = 0;
+
+    // Combat
+    this.combatState    = 'idle';   // idle, chasing, attacking
+    this.targetId       = null;
+    this.attackRange    = config.attackRange    ?? 48;
+    this.attackDamage   = config.attackDamage   ?? 10;
+    this.attackVariance = config.attackVariance ?? 5;
+    this.attackSpeed    = config.attackSpeed    ?? 1200; // ms between attacks
+    this.attackTimer    = 0;
+    this.chaseTimer     = 0;
+    this.hitEffect      = null;
     // Stuck detection
     this.lastX        = this.x;
     this.lastY        = this.y;
@@ -298,5 +309,12 @@ export class Entity {
     ctx.textAlign  = 'center';
     ctx.fillText(this.label, screenX + this.width / 2, screenY + this.height + 12);
     ctx.textAlign  = 'left';
+
+    // Draw hit effect flash
+    if (this.hitEffect) {
+      const alpha = this.hitEffect.timer / 200;
+      ctx.fillStyle = 'rgba(255, 80, 80, ' + alpha + ')';
+      ctx.fillRect(screenX, screenY, this.width, this.height);
+    }
   }
 }

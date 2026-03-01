@@ -9,6 +9,7 @@ import { CollisionGrid } from '../engine/collision.js';
 import { ResourceNode, PlayerResources, RESOURCE_TYPES } from '../engine/resource.js';
 import { Building }      from '../engine/building.js';
 import { HUD }           from '../ui/hud.js';
+import { CombatSystem }  from '../engine/combat.js';
 
 const canvas = document.getElementById('gameCanvas');
 const ctx    = canvas.getContext('2d');
@@ -82,10 +83,10 @@ const peasant2 = new Peasant({ owner: 1, x: 144, y:  96, playerResources: p1Reso
 const entities = [
   peasant1,
   peasant2,
-  new Entity({ label: 'Footman', type: 'unit', owner: 1, x: 160, y: 200, maxHealth: 100 }),
-  new Entity({ label: 'Footman', type: 'unit', owner: 1, x: 196, y: 200, maxHealth: 100 }),
-  new Entity({ label: 'Grunt',   type: 'unit', owner: 2, x: 600, y: 400, maxHealth: 120 }),
-  new Entity({ label: 'Grunt',   type: 'unit', owner: 2, x: 640, y: 400, maxHealth: 120 }),
+  new Entity({ label: 'Footman', type: 'unit', owner: 1, x: 160, y: 200, maxHealth: 100, attackDamage: 12, attackVariance: 4, attackRange: 48, attackSpeed: 1000, speed: 130 }),
+  new Entity({ label: 'Footman', type: 'unit', owner: 1, x: 196, y: 200, maxHealth: 100, attackDamage: 12, attackVariance: 4, attackRange: 48, attackSpeed: 1000, speed: 130 }),
+  new Entity({ label: 'Grunt',   type: 'unit', owner: 2, x: 600, y: 400, maxHealth: 150, attackDamage: 15, attackVariance: 6, attackRange: 48, attackSpeed: 1200, speed: 110 }),
+  new Entity({ label: 'Grunt',   type: 'unit', owner: 2, x: 640, y: 400, maxHealth: 150, attackDamage: 15, attackVariance: 6, attackRange: 48, attackSpeed: 1200, speed: 110 }),
 ];
 
 // Give every entity access to pathfinder and grid for dynamic replanning
@@ -167,6 +168,13 @@ canvas.addEventListener('contextmenu', (e) => {
   const worldY = e.clientY - rect.top  + camera.y;
   const selected = getSelected();
 
+  // Attack order if right-clicked on enemy
+  const clickedEnemy = entities.find(e => e.owner !== 1 && e.alive && worldX >= e.x && worldX <= e.x + e.width && worldY >= e.y && worldY <= e.y + e.height);
+  if (clickedEnemy) {
+    selected.forEach(u => { u.targetId = clickedEnemy.id; u.combatState = "chasing"; u.path = []; u.moving = false; });
+    return;
+  }
+
   // Check if right-clicked on a resource node
   const clickedResource = resources.find(r =>
     r.alive &&
@@ -235,8 +243,21 @@ canvas.addEventListener('contextmenu', (e) => {
   enemyTiles.forEach(({ col, row, tile }) => grid.setTile(col, row, tile));
 });
 
+window.debugEntities = entities;
 function update(delta) {
   grid.update(delta);
+
+  // Run combat system
+  CombatSystem.update(delta, entities);
+
+  // Tick hit effects
+  entities.forEach(e => {
+    if (e.hitEffect) {
+      e.hitEffect.timer -= delta;
+      if (e.hitEffect.timer <= 0) e.hitEffect = null;
+    }
+  });
+
   collisionGrid.clear();
   entities.forEach(e => { if (e.alive) collisionGrid.insert(e); });
   camera.update(delta);
