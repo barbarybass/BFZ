@@ -1,9 +1,10 @@
-import { GameLoop }     from '../engine/gameLoop.js';
-import { Grid }         from '../engine/grid.js';
-import { Camera }       from '../engine/camera.js';
-import { Entity }       from '../engine/entity.js';
-import { Pathfinder }   from '../engine/pathfinder.js';
-import { SelectionBox } from '../ui/selectionBox.js';
+import { GameLoop }      from '../engine/gameLoop.js';
+import { Grid }          from '../engine/grid.js';
+import { Camera }        from '../engine/camera.js';
+import { Entity }        from '../engine/entity.js';
+import { Pathfinder }    from '../engine/pathfinder.js';
+import { SelectionBox }  from '../ui/selectionBox.js';
+import { CollisionGrid } from '../engine/collision.js';
 
 const canvas = document.getElementById('gameCanvas');
 const ctx    = canvas.getContext('2d');
@@ -11,12 +12,13 @@ const ctx    = canvas.getContext('2d');
 canvas.width  = 800;
 canvas.height = 600;
 
-const grid       = new Grid(32, 24, 32);
-const mapWidth   = grid.cols * grid.tileSize;
-const mapHeight  = grid.rows * grid.tileSize;
-const camera     = new Camera(canvas.width, canvas.height, mapWidth, mapHeight);
-const pathfinder = new Pathfinder(grid);
-const selBox     = new SelectionBox();
+const grid          = new Grid(32, 24, 32);
+const mapWidth      = grid.cols * grid.tileSize;
+const mapHeight     = grid.rows * grid.tileSize;
+const camera        = new Camera(canvas.width, canvas.height, mapWidth, mapHeight);
+const pathfinder    = new Pathfinder(grid);
+const selBox        = new SelectionBox();
+const collisionGrid = new CollisionGrid(mapWidth, mapHeight, grid.tileSize);
 
 const entities = [
   new Entity({ label: 'Footman', type: 'unit', owner: 1, x:  64, y:  64, maxHealth: 100 }),
@@ -103,20 +105,40 @@ canvas.addEventListener('contextmenu', (e) => {
   const baseCol = Math.floor(worldX / grid.tileSize);
   const baseRow = Math.floor(worldY / grid.tileSize);
   const base = nearestWalkable(baseCol, baseRow);
+  if (!base) return;
   const selected = getSelected();
+  // Temporarily mark enemy unit tiles as unwalkable so pathfinder routes around them
+  const enemyTiles = [];
+  entities.forEach(e => {
+    if (e.owner !== 1 && e.alive) {
+      const pos = e.getGridPosition(grid.tileSize);
+      const tile = grid.getTile(pos.col, pos.row);
+      if (tile && tile.walkable) {
+        enemyTiles.push({ col: pos.col, row: pos.row, tile });
+        grid.setTile(pos.col, pos.row, { ...tile, walkable: false });
+      }
+    }
+  });
+
   selected.forEach((unit, index) => {
     let offsetCol = Math.max(0, Math.min(base.col + (index % 3) - 1, grid.cols - 1));
     let offsetRow = Math.max(0, Math.min(base.row + Math.floor(index / 3), grid.rows - 1));
     const dest = nearestWalkable(offsetCol, offsetRow);
+    if (!dest) return;
     const unitPos = unit.getGridPosition(grid.tileSize);
     const path = pathfinder.findPath(unitPos.col, unitPos.row, dest.col, dest.row);
     if (path) unit.setPath(path, grid.tileSize);
   });
+
+  // Restore enemy tiles
+  enemyTiles.forEach(({ col, row, tile }) => grid.setTile(col, row, tile));
 });
 
 function update(delta) {
+  collisionGrid.clear();
+  entities.forEach(e => { if (e.alive) collisionGrid.insert(e); });
   camera.update(delta);
-  entities.forEach(e => e.update(delta, grid, entities));
+  entities.forEach(e => e.update(delta, grid, entities, collisionGrid));
 }
 
 function render() {

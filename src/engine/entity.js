@@ -16,6 +16,7 @@ export class Entity {
     this.speed  = config.speed ?? 120;
     this.path   = [];
     this.moving = false;
+    this.blockedTimer = 0;
   }
   takeDamage(amount) {
     this.currentHealth = Math.max(0, this.currentHealth - amount);
@@ -39,48 +40,62 @@ export class Entity {
       y: p.row * tileSize + tileSize / 2 - this.height / 2
     }));
     this.moving = this.path.length > 0;
+    this.blockedTimer = 0;
   }
   applySeparation(entities, grid) {
     if (!entities) return;
-    const separationRadius = this.width * 1.1;
-    const separationForce  = 1.5;
+    // Only stationary friendly units step aside for moving friendlies
+    if (this.moving) return;
+
     for (const other of entities) {
       if (other === this || !other.alive) continue;
+      // Skip enemy units - they are handled as solid obstacles
+      if (other.owner !== this.owner) continue;
+      if (!other.moving) continue;
+
       const dx = this.x - other.x;
       const dy = this.y - other.y;
       const distance = Math.sqrt(dx * dx + dy * dy);
-      if (distance < separationRadius && distance > 0) {
-        const force = (separationRadius - distance) / separationRadius * separationForce;
-        let newX = this.x + (dx / distance) * force;
-        let newY = this.y + (dy / distance) * force;
+      const stepAsideRadius = this.width * 2.5;
+
+      if (distance < stepAsideRadius && distance > 0) {
+        // Get the moving unit's direction of travel
+        const pathTarget = other.path && other.path.length > 0 ? other.path[0] : null;
+        if (!pathTarget) continue;
+
+        const travelDx = pathTarget.x - other.x;
+        const travelDy = pathTarget.y - other.y;
+        const travelDist = Math.sqrt(travelDx * travelDx + travelDy * travelDy);
+        if (travelDist === 0) continue;
+
+        // Perpendicular directions to travel vector
+        const perpX =  travelDy / travelDist;
+        const perpY = -travelDx / travelDist;
+
+        // Pick the perpendicular direction that moves away from the moving unit
+        const dot = dx * perpX + dy * perpY;
+        const sideX = dot >= 0 ? perpX : -perpX;
+        const sideY = dot >= 0 ? perpY : -perpY;
+
+        const force = (stepAsideRadius - distance) / stepAsideRadius * 2.5;
+        const newX = this.x + sideX * force;
+        const newY = this.y + sideY * force;
+
+        // Only move if new position is walkable
         if (grid) {
           const newCol = Math.floor((newX + this.width  / 2) / grid.tileSize);
           const newRow = Math.floor((newY + this.height / 2) / grid.tileSize);
           const tile = grid.getTile(newCol, newRow);
-          if (!tile || !tile.walkable) {
-            const xCol = Math.floor((newX + this.width  / 2) / grid.tileSize);
-            const xRow = Math.floor((this.y + this.height / 2) / grid.tileSize);
-            const xTile = grid.getTile(xCol, xRow);
-            if (xTile && xTile.walkable) {
-              newY = this.y;
-            } else {
-              const yCol = Math.floor((this.x + this.width  / 2) / grid.tileSize);
-              const yRow = Math.floor((newY + this.height / 2) / grid.tileSize);
-              const yTile = grid.getTile(yCol, yRow);
-              if (yTile && yTile.walkable) {
-                newX = this.x;
-              } else {
-                continue;
-              }
-            }
-          }
+          if (!tile || !tile.walkable) continue;
         }
+
         this.x = newX;
         this.y = newY;
       }
     }
   }
-  update(delta, grid, entities) {
+
+  update(delta, grid, entities, collisionGrid) {
     this.applySeparation(entities, grid);
     if (!this.path || this.path.length === 0) { this.moving = false; return; }
     const target = this.path[0];
@@ -90,13 +105,58 @@ export class Entity {
     const distance   = Math.sqrt(dx * dx + dy * dy);
     const moveAmount = this.speed * (delta / 1000);
     if (distance <= moveAmount) {
+      if (collisionGrid && collisionGrid.isOccupied(target.x, target.y, this.width, this.height, this)) {
+        this.blockedTimer += delta;
+        if (this.blockedTimer > 300) {
+          this.path.shift();
+          this.blockedTimer = 0;
+        }
+        return;
+      }
       this.x = target.x;
       this.y = target.y;
       this.path.shift();
+      this.blockedTimer = 0;
       if (this.path.length === 0) this.moving = false;
     } else {
-      this.x += (dx / distance) * moveAmount;
-      this.y += (dy / distance) * moveAmount;
+      const newX = this.x + (dx / distance) * moveAmount;
+      const newY = this.y + (dy / distance) * moveAmount;
+      if (grid) {
+        const newCol = Math.floor((newX + this.width  / 2) / grid.tileSize);
+        const newRow = Math.floor((newY + this.height / 2) / grid.tileSize);
+        const tile = grid.getTile(newCol, newRow);
+        if (!tile || !tile.walkable) return;
+      }
+      if (collisionGrid) {
+        const blockedFull = collisionGrid.isOccupied(newX, newY, this.width, this.height, this);
+        if (!blockedFull) {
+          this.x = newX;
+          this.y = newY;
+          this.blockedTimer = 0;
+        } else {
+          // Try sliding along X axis only
+          const blockedX = collisionGrid.isOccupied(newX, this.y, this.width, this.height, this);
+          // Try sliding along Y axis only
+          const blockedY = collisionGrid.isOccupied(this.x, newY, this.width, this.height, this);
+          if (!blockedX) {
+            this.x = newX;
+            this.blockedTimer = 0;
+          } else if (!blockedY) {
+            this.y = newY;
+            this.blockedTimer = 0;
+          } else {
+            // Fully blocked — wait briefly then skip waypoint
+            this.blockedTimer += delta;
+            if (this.blockedTimer > 400) {
+              this.path.shift();
+              this.blockedTimer = 0;
+            }
+          }
+        }
+      } else {
+        this.x = newX;
+        this.y = newY;
+      }
     }
     if (grid) {
       const mapW = grid.cols * grid.tileSize;
