@@ -17,6 +17,11 @@ export class Entity {
     this.path   = [];
     this.moving = false;
     this.blockedTimer = 0;
+    // Stuck detection
+    this.lastX        = this.x;
+    this.lastY        = this.y;
+    this.stuckTimer   = 0;
+    this.stuckTimeout = 800;  // ms before declaring stuck
   }
   takeDamage(amount) {
     this.currentHealth = Math.max(0, this.currentHealth - amount);
@@ -40,7 +45,56 @@ export class Entity {
       y: p.row * tileSize + tileSize / 2 - this.height / 2
     }));
     this.moving = this.path.length > 0;
-    this.blockedTimer = 0;
+    this.blockedTimer    = 0;
+    this.stuckTimer      = 0;
+    this.replanAttempts  = 0;
+    this.lastX = this.x;
+    this.lastY = this.y;
+    // Store final destination from last waypoint in original path
+    if (path.length > 0) {
+      const last = path[path.length - 1];
+      this.finalDestCol = last.col;
+      this.finalDestRow = last.row;
+    }
+  }
+
+  // Try to replan around a blocked position
+  tryReplan(blockerEntities) {
+    if (!this.pathfinder || !this.grid) return false;
+    if (this.replanAttempts >= this.maxReplanAttempts) return false;
+    if (this.finalDestCol === null) return false;
+
+    this.replanAttempts++;
+
+    // Temporarily mark all nearby living units (except self) as unwalkable
+    const blocked = [];
+    if (blockerEntities) {
+      for (const other of blockerEntities) {
+        if (other === this || !other.alive) continue;
+        const pos = other.getGridPosition(this.grid.tileSize);
+        const tile = this.grid.getTile(pos.col, pos.row);
+        if (tile && tile.walkable) {
+          blocked.push({ col: pos.col, row: pos.row, tile });
+          this.grid.setTile(pos.col, pos.row, { ...tile, walkable: false });
+        }
+      }
+    }
+
+    const myPos = this.getGridPosition(this.grid.tileSize);
+    const path  = this.pathfinder.findPath(
+      myPos.col, myPos.row,
+      this.finalDestCol, this.finalDestRow
+    );
+
+    // Restore tiles
+    for (const b of blocked) this.grid.setTile(b.col, b.row, b.tile);
+
+    if (path && path.length > 1) {
+      this.setPath(path, this.grid.tileSize);
+      this.replanAttempts = Math.min(this.replanAttempts, this.maxReplanAttempts);
+      return true;
+    }
+    return false;
   }
   applySeparation(entities, grid) {
     if (!entities) return;
@@ -97,6 +151,61 @@ export class Entity {
 
   update(delta, grid, entities, collisionGrid) {
     this.applySeparation(entities, grid);
+
+    // Stuck detection: if moving but not progressing, replan around obstacle
+    if (this.moving) {
+      const movedDist = Math.sqrt(
+        Math.pow(this.x - this.lastX, 2) +
+        Math.pow(this.y - this.lastY, 2)
+      );
+      if (movedDist < 0.5) {
+        this.stuckTimer += delta;
+        if (this.stuckTimer > this.stuckTimeout) {
+          this.stuckTimer = 0;
+          // Attempt to replan around whatever is blocking us
+          const replanned = this.tryReplan(entities);
+          if (!replanned) {
+            // Replanning failed or exhausted - nudge diagonally to break deadlock
+            let escapeX = 0, escapeY = 0;
+            if (entities) {
+              for (const other of entities) {
+                if (other === this || !other.alive) continue;
+                const dx = this.x - other.x;
+                const dy = this.y - other.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < this.width * 2 && dist > 0) {
+                  escapeX += dx / dist;
+                  escapeY += dy / dist;
+                }
+              }
+            }
+            if (escapeX === 0 && escapeY === 0) {
+              const dir = this.getTravelDirection();
+              if (dir) { escapeX = dir.x + dir.y; escapeY = dir.y - dir.x; }
+              else      { escapeX = 1; escapeY = 1; }
+            }
+            const escapeDist = Math.sqrt(escapeX * escapeX + escapeY * escapeY);
+            if (escapeDist > 0) {
+              const nudge = this.width;
+              const newX = this.x + (escapeX / escapeDist) * nudge;
+              const newY = this.y + (escapeY / escapeDist) * nudge;
+              if (grid) {
+                const tile = grid.getTile(
+                  Math.floor((newX + this.width  / 2) / grid.tileSize),
+                  Math.floor((newY + this.height / 2) / grid.tileSize)
+                );
+                if (tile && tile.walkable) { this.x = newX; this.y = newY; }
+              } else { this.x = newX; this.y = newY; }
+            }
+          }
+        }
+      } else {
+        this.stuckTimer = 0;
+      }
+      this.lastX = this.x;
+      this.lastY = this.y;
+    }
+
     if (!this.path || this.path.length === 0) { this.moving = false; return; }
     const target = this.path[0];
     if (!target) { this.moving = false; this.path = []; return; }
@@ -128,16 +237,20 @@ export class Entity {
         if (!tile || !tile.walkable) return;
       }
       if (collisionGrid) {
-        const blockedFull = collisionGrid.isOccupied(newX, newY, this.width, this.height, this);
+        // Use a smaller hitbox for friendly unit collision so they can squeeze past
+        const hitW = this.width  * 0.6;
+        const hitH = this.height * 0.6;
+        const hitOffX = (this.width  - hitW) / 2;
+        const hitOffY = (this.height - hitH) / 2;
+
+        const blockedFull = collisionGrid.isOccupied(newX + hitOffX, newY + hitOffY, hitW, hitH, this);
         if (!blockedFull) {
           this.x = newX;
           this.y = newY;
           this.blockedTimer = 0;
         } else {
-          // Try sliding along X axis only
-          const blockedX = collisionGrid.isOccupied(newX, this.y, this.width, this.height, this);
-          // Try sliding along Y axis only
-          const blockedY = collisionGrid.isOccupied(this.x, newY, this.width, this.height, this);
+          const blockedX = collisionGrid.isOccupied(newX + hitOffX, this.y + hitOffY, hitW, hitH, this);
+          const blockedY = collisionGrid.isOccupied(this.x + hitOffX, newY + hitOffY, hitW, hitH, this);
           if (!blockedX) {
             this.x = newX;
             this.blockedTimer = 0;
@@ -145,7 +258,6 @@ export class Entity {
             this.y = newY;
             this.blockedTimer = 0;
           } else {
-            // Fully blocked — wait briefly then skip waypoint
             this.blockedTimer += delta;
             if (this.blockedTimer > 400) {
               this.path.shift();
