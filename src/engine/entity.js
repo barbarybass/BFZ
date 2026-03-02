@@ -34,9 +34,13 @@ export class Entity {
     this.stuckTimer   = 0;
     this.stuckTimeout = 800;  // ms before declaring stuck
   }
-  takeDamage(amount) {
+  takeDamage(amount, attacker) {
     this.currentHealth = Math.max(0, this.currentHealth - amount);
     if (this.currentHealth === 0) this.alive = false;
+    if (attacker && this.combatState === 'idle') {
+      this.targetId    = attacker.id;
+      this.combatState = 'chasing';
+    }
   }
   heal(amount) {
     this.currentHealth = Math.min(this.maxHealth, this.currentHealth + amount);
@@ -109,7 +113,7 @@ export class Entity {
   }
   applySeparation(entities, grid) {
     if (!entities) return;
-    // Only stationary friendly units step aside for moving friendlies
+    if (this.combatState === 'attacking') return;
     if (this.moving) return;
 
     for (const other of entities) {
